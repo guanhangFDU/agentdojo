@@ -9,6 +9,7 @@ from agentdojo.default_suites.v1.banking import banking_task_suite
 from agentdojo.default_suites.v1.slack import slack_task_suite
 from agentdojo.default_suites.v1.travel import travel_task_suite
 from agentdojo.default_suites.v1.workspace import workspace_task_suite
+from agentdojo.my_suites.v1.slack import my_slack_task_suite
 from agentdojo.task_suite.task_suite import TaskSuite
 
 _V1_SUITES: dict[str, TaskSuite] = {
@@ -60,6 +61,10 @@ _V1_2_2_SUITES: dict[str, TaskSuite] = {
     "slack": slack_task_suite.get_new_version((1, 2, 0)),
 }
 
+_MY_V1_SUITES: dict[str, TaskSuite] = {
+    "slack": my_slack_task_suite,
+}
+
 _SUITES: defaultdict[str, dict[str, TaskSuite]] = defaultdict(
     dict,
     {
@@ -70,6 +75,7 @@ _SUITES: defaultdict[str, dict[str, TaskSuite]] = defaultdict(
         "v1.2": _V1_2_SUITES,
         "v1.2.1": _V1_2_1_SUITES,
         "v1.2.2": _V1_2_2_SUITES,
+        "my_v1": _MY_V1_SUITES,
     },
 )
 
