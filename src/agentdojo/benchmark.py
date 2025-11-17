@@ -72,15 +72,121 @@ def run_task_with_injection_tasks(
 
     if attack.is_dos_attack:
         # No need to run all injection tasks since we don't care about the injection target!
-        injection_tasks_to_run = [next(iter(suite.injection_tasks.keys()))]
+        injection_tasks_to_run_ids: list[str] = [next(iter(suite.injection_tasks.keys()))]
     else:
-        injection_tasks_to_run = suite.injection_tasks
+        if injection_tasks is not None:
+            injection_tasks_to_run_ids = list(injection_tasks)
+        else:
+            injection_tasks_to_run_ids = list(suite.injection_tasks.keys())
 
-    if injection_tasks is not None and not attack.is_dos_attack:
-        injection_tasks_to_run = injection_tasks
+    multiround_base_task_id = (
+        f"{suite.name}:{user_task.ID}"
+        if getattr(suite, "is_multiround_suites", False)
+        else None
+    )
 
-    for injection_task_id in injection_tasks_to_run:
+    for injection_task_id in injection_tasks_to_run_ids:
         injection_task = suite.get_injection_task_by_id(injection_task_id)
+
+        # 看看这个 injection_task 是不是一个“多轮 wrapper”
+        # 约定：类属性 MULTI_ROUND_COMPONENTS = ["injection_task_11", "injection_task_12", ...]
+        components = getattr(injection_task, "MULTI_ROUND_COMPONENTS", None)
+
+        # ===== 情况 A：多轮 wrapper 注入任务 =====
+        if components and getattr(suite, "is_multiround_suites", False) and not attack.is_dos_attack:
+            # 用一个稳定的 task_id，把这个 wrapper 下所有轮次粘在一起
+            multiround_task_id = f"{multiround_base_task_id}:{injection_task_id}" if multiround_base_task_id else None
+
+            # 对每个子注入任务（真正的 Round1/2/3）依次跑
+            for round_num, comp_id in enumerate(components):
+                comp_task = suite.get_injection_task_by_id(comp_id)
+                task_injections = attack.attack(user_task, comp_task)
+
+                if logdir is not None and agent_pipeline.name is not None:
+                    try:
+                        task_result = load_task_results(
+                            agent_pipeline.name,
+                            suite.name,
+                            user_task.ID,
+                            attack_name=attack.name,
+                            injection_task=comp_task.ID,
+                            logdir=logdir,
+                        )
+                    except (ValidationError, FileNotFoundError):
+                        task_result = None
+                else:
+                    task_result = None
+
+                if task_result is not None and not force_rerun:
+                    logging.info(
+                        f"Skipping task '{user_task.ID}' with '{comp_task.ID}' because it was already run."
+                    )
+                    utility, security = task_result.utility, task_result.security
+                else:
+                    with TraceLogger(
+                        delegate=Logger.get(),
+                        suite_name=suite.name,
+                        user_task_id=user_task.ID,
+                        injection_task_id=comp_task.ID,
+                        injections=task_injections,
+                        attack_type=attack.name,
+                        pipeline_name=agent_pipeline.name,
+                        benchmark_version=benchmark_version,
+                    ) as logger:
+                        try:
+                            utility, security = suite.run_task_with_pipeline(
+                                agent_pipeline=agent_pipeline,
+                                user_task=user_task,
+                                injection_task=comp_task,
+                                injections=task_injections,
+                                round_num=round_num,
+                                task_id=multiround_task_id,
+                            )
+                        except BadRequestError as e:
+                            if (
+                                e.code == "context_length_exceeded"
+                                or e.param == "max_tokens"
+                                or "reduce the length of the messages." in repr(e)
+                            ):
+                                logger.log_error(
+                                    f"Skipping task '{user_task.ID}' with '{comp_task.ID}' "
+                                    f"due to context_length_exceeded: {e}"
+                                )
+                                utility = False
+                                security = True
+                            else:
+                                raise e
+                        except ApiError as e:
+                            if "internal server error" in str(e):
+                                logger.log_error(
+                                    f"Skipping task '{user_task.ID}' with '{comp_task.ID}' "
+                                    f"because of internal server error: {e}"
+                                )
+                                utility = False
+                                security = True
+                            else:
+                                raise e
+                        except ServerError as e:
+                            logger.log_error(
+                                f"Skipping task '{user_task.ID}' with '{comp_task.ID}' "
+                                f"because of internal server error: {e}"
+                            )
+                            utility = False
+                            security = True
+
+                        if attack.is_dos_attack:
+                            security = not utility
+
+                        logger.set_contextarg("utility", utility)
+                        logger.set_contextarg("security", security)
+
+                utility_results[(user_task.ID, comp_task.ID)] = utility
+                security_results[(user_task.ID, comp_task.ID)] = security
+
+            # wrapper 本身（InjectionTask1）不再单独跑一轮，直接 continue
+            continue
+
+        # ===== 情况 B：普通单轮注入任务 =====
         task_injections = attack.attack(user_task, injection_task)
 
         if logdir is not None and agent_pipeline.name is not None:
@@ -102,12 +208,11 @@ def run_task_with_injection_tasks(
             logging.info(f"Skipping task '{user_task.ID}' with '{injection_task.ID}' because it was already run.")
             utility, security = task_result.utility, task_result.security
         else:
-            # a trace logger captures logs and saves them, but also passes them to the delegate logger
             with TraceLogger(
                 delegate=Logger.get(),
                 suite_name=suite.name,
                 user_task_id=user_task.ID,
-                injection_task_id=injection_task_id,
+                injection_task_id=injection_task.ID,
                 injections=task_injections,
                 attack_type=attack.name,
                 pipeline_name=agent_pipeline.name,
@@ -115,7 +220,10 @@ def run_task_with_injection_tasks(
             ) as logger:
                 try:
                     utility, security = suite.run_task_with_pipeline(
-                        agent_pipeline, user_task, injection_task, task_injections
+                        agent_pipeline=agent_pipeline,
+                        user_task=user_task,
+                        injection_task=injection_task,
+                        injections=task_injections,
                     )
                 except BadRequestError as e:
                     if (

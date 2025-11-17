@@ -34,4 +34,4 @@ TOOLS = [
     post_webpage,
 ]
 
-task_suite = TaskSuite[SlackEnvironment]("slack", SlackEnvironment, [make_function(tool) for tool in TOOLS])
+task_suite = TaskSuite[SlackEnvironment]("slack", SlackEnvironment, [make_function(tool) for tool in TOOLS], benchmark_version=(1, 0, 0), is_multiround_suites=True)

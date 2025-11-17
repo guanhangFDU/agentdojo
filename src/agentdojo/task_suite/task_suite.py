@@ -122,6 +122,7 @@ class TaskSuite(Generic[Env]):
         tools: list[Function],
         data_path: Path | None = None,
         benchmark_version: BenchmarkVersion = (1, 0, 0),
+        is_multiround_suites: bool = False,
     ):
         self.name = name
         self.environment_type = environment_type
@@ -130,6 +131,8 @@ class TaskSuite(Generic[Env]):
         self._injection_tasks: dict[str, dict[BenchmarkVersion, BaseInjectionTask[Env]]] = defaultdict(dict)
         self.data_path = data_path
         self.benchmark_version = benchmark_version
+        self.is_multiround_suites = is_multiround_suites
+        self._context_storage: dict[str, dict] = {}
 
     def get_new_version(self, benchmark_version: BenchmarkVersion) -> Self:
         new_self = copy.deepcopy(self)
@@ -345,6 +348,8 @@ class TaskSuite(Generic[Env]):
         runtime_class: type[FunctionsRuntime] = FunctionsRuntime,
         environment: Env | None = None,
         verbose: bool = False,
+        round_num: int = 0,
+        task_id: str | None = None,
     ) -> tuple[bool, bool]:
         """Run a task with the provided pipeline.
 
@@ -356,6 +361,8 @@ class TaskSuite(Generic[Env]):
             runtime_class: The runtime class to use for the task.
             environment: The environment to use for the task.
             verbose: Whether to print debug information.
+            round_num: Current round index for multi-round suites (0-based).
+            task_id: Stable id to group multiple rounds of the same logical task.
 
         Returns:
             A tuple of two booleans, the first indicating whether the task was successful, and the second indicating if
@@ -370,6 +377,14 @@ class TaskSuite(Generic[Env]):
         else:
             task_environment = environment
 
+        runtime = runtime_class(self.tools)
+
+        messages: list[ChatMessage] = []
+        if self.is_multiround_suites and round_num > 0 and task_id:
+            ctx = self._context_storage.get(task_id)
+            if ctx is not None:
+                messages = ctx.get("messages", [])
+                task_environment = ctx.get("env", task_environment)
         # Create a copy of the environment before running the user task to then diff if needed
         pre_environment = task_environment.model_copy(deep=True)
         if isinstance(user_task, BaseUserTask):
@@ -377,24 +392,37 @@ class TaskSuite(Generic[Env]):
         else:
             prompt = user_task.GOAL
 
-        runtime = runtime_class(self.tools)
-        model_output = None
-        messages = []
+        model_output: list[MessageContentBlock] | None = None
         for _ in range(3):
-            # Run the user task
             try:
-                _, _, task_environment, messages, _ = agent_pipeline.query(prompt, runtime, task_environment)
+                _, _, task_environment, messages, _ = agent_pipeline.query(
+                    prompt,
+                    runtime,
+                    task_environment,
+                    messages=messages,
+                    extra_args={},
+                )
             except AbortAgentError as e:
                 # get last environment and messages
                 task_environment = e.task_environment
                 messages = e.messages
 
-            model_output = model_output_from_messages(messages)
+            try:
+                model_output = model_output_from_messages(messages)
+            except ValueError:
+                model_output = None
+
             if model_output is not None:
                 break
 
         if model_output is None:
             warnings.warn(f"Model output was None for task {user_task.ID}")
+
+        if self.is_multiround_suites and task_id:
+            self._context_storage[task_id] = {
+                "messages": messages,
+                "env": task_environment,
+            }
 
         functions_stack_trace = functions_stack_trace_from_messages(messages)
         utility = self._check_task_result(
