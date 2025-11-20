@@ -88,19 +88,19 @@ def run_task_with_injection_tasks(
     for injection_task_id in injection_tasks_to_run_ids:
         injection_task = suite.get_injection_task_by_id(injection_task_id)
 
-        # 看看这个 injection_task 是不是一个“多轮 wrapper”
-        # 约定：类属性 MULTI_ROUND_COMPONENTS = ["injection_task_11", "injection_task_12", ...]
         components = getattr(injection_task, "MULTI_ROUND_COMPONENTS", None)
 
-        # ===== 情况 A：多轮 wrapper 注入任务 =====
         if components and getattr(suite, "is_multiround_suites", False) and not attack.is_dos_attack:
-            # 用一个稳定的 task_id，把这个 wrapper 下所有轮次粘在一起
             multiround_task_id = f"{multiround_base_task_id}:{injection_task_id}" if multiround_base_task_id else None
 
-            # 对每个子注入任务（真正的 Round1/2/3）依次跑
             for round_num, comp_id in enumerate(components):
                 comp_task = suite.get_injection_task_by_id(comp_id)
                 task_injections = attack.attack(user_task, comp_task)
+
+                if getattr(suite, "is_multiround_suites", False):
+                    log_injection_task_id = f"{comp_task.ID}_round{round_num}"
+                else:
+                    log_injection_task_id = comp_task.ID
 
                 if logdir is not None and agent_pipeline.name is not None:
                     try:
@@ -127,7 +127,7 @@ def run_task_with_injection_tasks(
                         delegate=Logger.get(),
                         suite_name=suite.name,
                         user_task_id=user_task.ID,
-                        injection_task_id=comp_task.ID,
+                        injection_task_id=log_injection_task_id,
                         injections=task_injections,
                         attack_type=attack.name,
                         pipeline_name=agent_pipeline.name,
@@ -183,10 +183,8 @@ def run_task_with_injection_tasks(
                 utility_results[(user_task.ID, comp_task.ID)] = utility
                 security_results[(user_task.ID, comp_task.ID)] = security
 
-            # wrapper 本身（InjectionTask1）不再单独跑一轮，直接 continue
             continue
 
-        # ===== 情况 B：普通单轮注入任务 =====
         task_injections = attack.attack(user_task, injection_task)
 
         if logdir is not None and agent_pipeline.name is not None:
@@ -307,13 +305,22 @@ def benchmark_suite_with_injections(
 
     injection_tasks_utility_results = {}
     if not attack.is_dos_attack:
-        for injection_task_id, injection_task in injection_tasks_to_run.items():
+        single_round_tasks = {}
+        multiround_controller_tasks = {}
+
+        for inj_id, inj_task in injection_tasks_to_run.items():
+            if hasattr(inj_task, "MULTI_ROUND_COMPONENTS"):
+                multiround_controller_tasks[inj_id] = inj_task
+            else:
+                single_round_tasks[inj_id] = inj_task
+
+        for injection_task_id, injection_task in single_round_tasks.items():
             successful, _ = run_task_without_injection_tasks(
                 suite, agent_pipeline, injection_task, logdir, force_rerun, benchmark_version
             )
             injection_tasks_utility_results[injection_task_id] = successful
 
-        if not all(injection_tasks_utility_results.values()):
+        if single_round_tasks and not all(injection_tasks_utility_results.values()):
             warnings.warn("Not all injection tasks were solved as user tasks.")
 
     for user_task in user_tasks_to_run:

@@ -133,7 +133,8 @@ class ToolKnowledgeAttack(ImportantInstructionsAttack):
     def attack(self, user_task: BaseUserTask, injection_task: BaseInjectionTask) -> dict[str, str]:
         injections = {}
         tools_sequence = self.get_tools_sequence(injection_task)
-        for inj in self.get_injection_candidates(user_task):
+        target_vectors = self.get_target_vectors(user_task, injection_task)
+        for inj in target_vectors:
             injections[inj] = self.jailbreak.format(
                 goal=injection_task.GOAL,
                 user=self.user_name,

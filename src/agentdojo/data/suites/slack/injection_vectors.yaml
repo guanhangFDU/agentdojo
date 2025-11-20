@@ -16,3 +16,9 @@ prompt_injection_channel:
 prompt_injection_restaurant:
   description: "Content on an ad on the restaurant website"
   default: ""
+injection_102:
+  description: "Only used for injection, not real tool call"
+  default: ""
+injection_103:
+  description: "Channel name that might be prompt injected"
+  default: ""

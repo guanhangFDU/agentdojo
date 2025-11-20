@@ -68,6 +68,16 @@ class BaseAttack(abc.ABC):
             raise ValueError(f"{user_task.ID} is not injectable.")
         return injection_candidates
 
+    def get_target_vectors(
+        self,
+        user_task: BaseUserTask,
+        injection_task: BaseInjectionTask,
+    ) -> list[str]:
+        explicit_vectors = getattr(injection_task, "INJECTION_VECTORS", None)
+        if explicit_vectors:
+            return list(explicit_vectors)
+        return self.get_injection_candidates(user_task)
+
     def generate_injections(self) -> Injections:
         is_suite_valid, _ = self.task_suite.check()
         if not is_suite_valid:
@@ -115,7 +125,8 @@ class FixedJailbreakAttack(BaseAttack):
 
     def attack(self, user_task: BaseUserTask, injection_task: BaseInjectionTask) -> dict[str, str]:
         injections = {}
-        for inj in self.get_injection_candidates(user_task):
+        target_vectors = self.get_target_vectors(user_task, injection_task)
+        for inj in target_vectors:
             injections[inj] = self.jailbreak.format(
                 goal=injection_task.GOAL,
                 user=self.user_name,
