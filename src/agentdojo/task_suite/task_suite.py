@@ -379,17 +379,12 @@ class TaskSuite(Generic[Env]):
 
         runtime = runtime_class(self.tools)
 
-        # messages: list[ChatMessage] = []
-        # if self.is_multiround_suites and round_num > 0 and task_id:
-        #     context = self._context_storage.get(task_id)
-        #     if context is not None:
-        #         messages = context.get("messages", [])
-        #         task_environment = context.get("env", task_environment)
         messages: list[ChatMessage] = []
         if self.is_multiround_suites and round_num > 0 and task_id:
             context = self._context_storage.get(task_id)
             if context is not None:
                 messages = context.get("messages", [])
+                # task_environment = context.get("env", task_environment)
         # Create a copy of the environment before running the user task to then diff if needed
         pre_environment = task_environment.model_copy(deep=True)
         if isinstance(user_task, BaseUserTask):
