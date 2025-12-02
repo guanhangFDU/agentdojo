@@ -24,15 +24,19 @@ from agentdojo.agent_pipeline.llms.local_llm import LocalLLM
 from agentdojo.agent_pipeline.llms.openai_llm import OpenAILLM, OpenAILLMToolFilter
 from agentdojo.agent_pipeline.llms.prompting_llm import PromptingLLM
 from agentdojo.agent_pipeline.pi_detector import TransformersBasedPIDetector
+from agentdojo.agent_pipeline.llms.ipiguard_llm import OpenAIConstructLLM, OpenAITraverseLLM
 from agentdojo.agent_pipeline.tool_execution import (
     ToolsExecutionLoop,
     ToolsExecutor,
     tool_result_to_str,
+    DagToolsExecutor,
+    DagToolsExecutionLoop,
 )
 from agentdojo.functions_runtime import EmptyEnv, Env, FunctionsRuntime
 from agentdojo.logging import Logger
 from agentdojo.models import MODEL_PROVIDERS, ModelsEnum
 from agentdojo.types import ChatMessage
+from agentdojo.agent_pipeline.pi_detector import MELON
 
 TOOL_FILTER_PROMPT = (
     "Your task is to filter the list of tools to only include those that are relevant to the user's task."
@@ -45,6 +49,8 @@ DEFENSES = [
     "transformers_pi_detector",
     "spotlighting_with_delimiting",
     "repeat_user_prompt",
+    "melon",
+    "ipiguard",
 ]
 """Available defenses."""
 
@@ -261,5 +267,34 @@ class AgentPipeline(BasePipelineElement):
             tools_loop = ToolsExecutionLoop([ToolsExecutor(tool_output_formatter=delimited_tool_output_formatter), llm])
             pipeline = cls([system_message_component, init_query_component, llm, tools_loop])
             pipeline.name = f"{llm_name}-{config.defense}"
+            return pipeline
+        if config.defense == "melon":
+            tools_loop = ToolsExecutionLoop(
+                [
+                    ToolsExecutor(),
+                    MELON(
+                        llm,
+                        threshold=0.1,
+                    ),
+                ]
+            )
+            
+            pipeline = cls([system_message_component, init_query_component, llm, tools_loop])
+            pipeline.name = f"{llm_name}-{config.defense}"
+            return pipeline
+
+        if config.defense == "ipiguard":
+            client = llm.client
+            if "gpt" in config.llm or "Qwen" in config.llm or "llama" in config.llm:
+                construct_llm = OpenAIConstructLLM(client, config.llm)
+                traverse_llm = OpenAITraverseLLM(client, config.llm)
+            else:
+                raise ValueError("Dag defense is not yet supported for the model: {config.llm}, try OpenAI/Anthropic's models.")
+
+            executor = DagToolsExecutor(traverse_llm)
+            tools_loop = DagToolsExecutionLoop(executor)
+            
+            pipeline = cls([system_message_component, init_query_component, construct_llm, tools_loop])
+            pipeline.name = llm_name
             return pipeline
         raise ValueError("Invalid defense name")

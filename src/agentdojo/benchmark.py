@@ -61,6 +61,7 @@ def run_task_with_injection_tasks(
             a log for the task.
         injection_tasks: The injection tasks to run. If None, all injection tasks in the suite will be run.
 
+
     Returns:
         A tuple of two dictionaries. The first dictionary contains the utility results for each injection
             task and user task couple. The second dictionary contains the security results for each
@@ -85,22 +86,41 @@ def run_task_with_injection_tasks(
         else None
     )
 
+    user_components: Sequence[str] | None = getattr(user_task, "MULTI_ROUND_COMPONENTS", None)
+
     for injection_task_id in injection_tasks_to_run_ids:
         injection_task = suite.get_injection_task_by_id(injection_task_id)
 
-        components = getattr(injection_task, "MULTI_ROUND_COMPONENTS", None)
+        injection_components = getattr(injection_task, "MULTI_ROUND_COMPONENTS", None)
 
-        if components and getattr(suite, "is_multiround_suites", False) and not attack.is_dos_attack:
+        if (
+            getattr(suite, "is_multiround_suites", False)
+            and user_components
+            and injection_components
+            and not attack.is_dos_attack
+        ):
+            multi_u, multi_s = run_user_injection_multi_tasks(
+                suite=suite,
+                agent_pipeline=agent_pipeline,
+                controller_user_task=user_task,
+                controller_injection_task=injection_task,
+                attack=attack,
+                logdir=logdir,
+                force_rerun=force_rerun,
+                benchmark_version=benchmark_version,
+                multiround_base_task_id=multiround_base_task_id,
+            )
+            utility_results.update(multi_u)
+            security_results.update(multi_s)
+            continue
+
+        if injection_components and getattr(suite, "is_multiround_suites", False) and not attack.is_dos_attack:
             multiround_task_id = f"{multiround_base_task_id}:{injection_task_id}" if multiround_base_task_id else None
 
-            for round_num, comp_id in enumerate(components):
+            for round_num, comp_id in enumerate(injection_components):
                 comp_task = suite.get_injection_task_by_id(comp_id)
                 task_injections = attack.attack(user_task, comp_task)
-
-                if getattr(suite, "is_multiround_suites", False):
-                    log_injection_task_id = f"{comp_task.ID}_round{round_num}"
-                else:
-                    log_injection_task_id = comp_task.ID
+                log_injection_task_id = comp_task.ID
 
                 if logdir is not None and agent_pipeline.name is not None:
                     try:
@@ -293,7 +313,23 @@ def benchmark_suite_with_injections(
     if user_tasks is not None:
         user_tasks_to_run = [suite.get_user_task_by_id(user_task_id) for user_task_id in user_tasks]
     else:
-        user_tasks_to_run = suite.user_tasks.values()
+        # user_tasks_to_run = suite.user_tasks.values()
+        all_tasks = list(suite.user_tasks.values())
+        if getattr(suite, "is_multiround_suites", False):
+            controller_tasks = [
+                t for t in all_tasks
+                if getattr(t, "MULTI_ROUND_COMPONENTS", None)
+            ]
+            subround_ids: set[str] = set()
+            for ctrl in controller_tasks:
+                subround_ids.update(getattr(ctrl, "MULTI_ROUND_COMPONENTS", []))
+
+            user_tasks_to_run = [
+                t for t in all_tasks
+                if t.ID not in subround_ids
+            ]
+        else:
+            user_tasks_to_run = all_tasks
 
     if injection_tasks is not None:
         injection_tasks_to_run = {
@@ -560,3 +596,167 @@ def load_suite_results(
                     pipeline_name, suite_name, user_task_id, attack_name, injection_task_id, logdir
                 )
     return results_without_injections, results_with_injections
+
+def run_user_injection_multi_tasks(
+    suite: TaskSuite,
+    agent_pipeline: BasePipelineElement,
+    controller_user_task: BaseUserTask,
+    controller_injection_task: BaseInjectionTask,
+    attack: BaseAttack,
+    logdir: Path | None,
+    force_rerun: bool,
+    benchmark_version: str | None,
+    multiround_base_task_id: str | None,
+) -> tuple[dict[tuple[str, str], bool], dict[tuple[str, str], bool]]:
+    """
+    处理 “多轮 user task × 多轮 injection task 1:1 对齐” 的情况。
+    例如：
+      UserTask0.MULTI_ROUND_COMPONENTS = [user_task_101, user_task_102, user_task_103]
+      InjectionTask1.MULTI_ROUND_COMPONENTS = [injection_task_101, injection_task_102, injection_task_103]
+    """
+
+    round_utility_results: dict[tuple[str, str], bool] = {}
+    round_security_results: dict[tuple[str, str], bool] = {}
+
+    # utility_results: dict[tuple[str, str], bool] = {}
+    # security_results: dict[tuple[str, str], bool] = {}
+
+    user_components_ids: Sequence[str] | None = getattr(
+        controller_user_task, "MULTI_ROUND_COMPONENTS", None
+    )
+    inj_components_ids: Sequence[str] | None = getattr(
+        controller_injection_task, "MULTI_ROUND_COMPONENTS", None
+    )
+
+    if not user_components_ids or not inj_components_ids:
+        return {}, {}
+
+    multiround_task_id = (
+        f"{multiround_base_task_id}:{controller_injection_task.ID}"
+        if multiround_base_task_id
+        else None
+    )
+
+    # 轮数取两边最短，避免长度不一致崩掉
+    rounds = min(len(user_components_ids), len(inj_components_ids))
+
+    for round_num in range(rounds):
+        user_comp_id = user_components_ids[round_num]
+        inj_comp_id = inj_components_ids[round_num]
+
+        round_user_task = suite.get_user_task_by_id(user_comp_id)
+        round_injection_task = suite.get_injection_task_by_id(inj_comp_id)
+
+        task_injections = attack.attack(round_user_task, round_injection_task)
+
+        log_injection_task_id = round_injection_task.ID
+
+        if logdir is not None and agent_pipeline.name is not None:
+            try:
+                task_result = load_task_results(
+                    agent_pipeline.name,
+                    suite.name,
+                    round_user_task.ID,
+                    attack_name=attack.name,
+                    injection_task=round_injection_task.ID,
+                    logdir=logdir,
+                )
+            except (ValidationError, FileNotFoundError):
+                task_result = None
+        else:
+            task_result = None
+
+        if task_result is not None and not force_rerun:
+            logging.info(
+                f"Skipping task '{round_user_task.ID}' with '{round_injection_task.ID}' "
+                f"because it was already run."
+            )
+            utility, security = task_result.utility, task_result.security
+        else:
+            with TraceLogger(
+                delegate=Logger.get(),
+                suite_name=suite.name,
+                user_task_id=round_user_task.ID,
+                injection_task_id=log_injection_task_id,
+                injections=task_injections,
+                attack_type=attack.name,
+                pipeline_name=agent_pipeline.name,
+                benchmark_version=benchmark_version,
+            ) as logger:
+                try:
+                    utility, security = suite.run_task_with_pipeline(
+                        agent_pipeline=agent_pipeline,
+                        user_task=round_user_task,
+                        injection_task=round_injection_task,
+                        injections=task_injections,
+                        round_num=round_num,
+                        task_id=multiround_task_id,
+                    )
+                except BadRequestError as e:
+                    if (
+                        e.code == "context_length_exceeded"
+                        or e.param == "max_tokens"
+                        or "reduce the length of the messages." in repr(e)
+                    ):
+                        logger.log_error(
+                            f"Skipping task '{round_user_task.ID}' with '{round_injection_task.ID}' "
+                            f"due to context_length_exceeded: {e}"
+                        )
+                        utility = False
+                        security = True
+                    else:
+                        raise e
+                except ApiError as e:
+                    if "internal server error" in str(e):
+                        logger.log_error(
+                            f"Skipping task '{round_user_task.ID}' with '{round_injection_task.ID}' "
+                            f"because of internal server error: {e}"
+                        )
+                        utility = False
+                        security = True
+                    else:
+                        raise e
+                except ServerError as e:
+                    logger.log_error(
+                        f"Skipping task '{round_user_task.ID}' with '{round_injection_task.ID}' "
+                        f"because of internal server error: {e}"
+                    )
+                    utility = False
+                    security = True
+
+                if attack.is_dos_attack:
+                    security = not utility
+
+                logger.set_contextarg("utility", utility)
+                logger.set_contextarg("security", security)
+
+        round_utility_results[(round_user_task.ID, round_injection_task.ID)] = utility
+        round_security_results[(round_user_task.ID, round_injection_task.ID)] = security
+
+        if round_utility_results:
+            controller_utility = all(round_utility_results.values())
+        else:
+            controller_utility = False
+
+        print(f"this is round_security_results {round_security_results}")
+        controller_security = any(round_security_results.values()) if round_security_results else False
+
+        aggregated_utility_results = {
+            (controller_user_task.ID, controller_injection_task.ID): controller_utility
+        }
+        aggregated_security_results = {
+            (controller_user_task.ID, controller_injection_task.ID): controller_security
+        }
+
+    return aggregated_utility_results, aggregated_security_results
+
+        # print(f"this is utility results {utility_results}")
+        # print(f"this is security_results {security_results}")
+
+        # for (u_id, inj_id), u_val in utility_results.items():
+        #     logger.set_contextarg(f"multi_round_utility::{u_id}::{inj_id}", u_val)
+
+        # for (u_id, inj_id), s_val in security_results.items():
+        #     logger.set_contextarg(f"multi_round_security::{u_id}::{inj_id}", s_val)
+
+    # return utility_results, security_results
